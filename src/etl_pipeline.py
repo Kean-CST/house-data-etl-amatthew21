@@ -43,77 +43,78 @@ PG_COLUMN_SCHEMA = (
 
 def extract(spark: SparkSession, csv_path: str) -> DataFrame:
     """Load the CSV dataset into a PySpark DataFrame with correct data types."""
-    df = (
-        spark.read.option("header", True).csv(csv_path)
-        # Cast numeric columns
-        .withColumn("price", F.col("price").cast("int"))
-        .withColumn("square_feet", F.col("square_feet").cast("int"))
-        .withColumn("num_bedrooms", F.col("num_bedrooms").cast("int"))
-        .withColumn("num_bathrooms", F.col("num_bathrooms").cast("int"))
-        .withColumn("house_age", F.col("house_age").cast("int"))
-        .withColumn("garage_spaces", F.col("garage_spaces").cast("int"))
-        .withColumn("lot_size_acres", F.col("lot_size_acres").cast("decimal(6,2)"))
-        .withColumn("location_score", F.col("location_score").cast("int"))
-        .withColumn("school_rating", F.col("school_rating").cast("int"))
-        .withColumn("crime_rate", F.col("crime_rate").cast("int"))
-        .withColumn("distance_downtown_miles", F.col("distance_downtown_miles").cast("decimal(6,2)"))
-        .withColumn("days_on_market", F.col("days_on_market").cast("int"))
-        # Cast dates
-        .withColumn("sale_date", F.to_date(F.col("sale_date"), "yyyy-MM-dd"))
-        # Cast booleans
-        .withColumn("has_pool", F.col("has_pool").cast("boolean"))
-        .withColumn("recently_renovated", F.col("recently_renovated").cast("boolean"))
-        .withColumn("has_children", F.col("has_children").cast("boolean"))
-        .withColumn("first_time_buyer", F.col("first_time_buyer").cast("boolean"))
-    )
-    return df
+    return spark.read.csv(csv_path, header=True, inferSchema=False)
 
 
 def transform(df: DataFrame) -> dict[str, DataFrame]:
     """Split the data by neighborhood and save each as a separate CSV file."""
-    partitions = {}
+    import shutil
+    import glob
 
-    boolean_cols = [
-        "has_pool",
-        "recently_renovated",
-        "has_children",
-        "first_time_buyer",
-    ]
+    # Boolean columns to normalise: raw CSV has TRUE/FALSE, expected output is True/False
+    bool_cols = ["has_pool", "recently_renovated", "has_children", "first_time_buyer"]
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    partitions: dict[str, DataFrame] = {}
     for hood in NEIGHBORHOODS:
-        hood_df = df.filter(F.col("neighborhood") == hood)
+        hood_df = (
+            df.filter(F.col("neighborhood") == hood)
+            .orderBy("house_id")
+        )
+        partitions[hood] = hood_df 
 
-        # Convert all boolean columns to "True"/"False" strings (ruff-safe)
-        for col_name in boolean_cols:
-            hood_df = hood_df.withColumn(
-                col_name,
-                F.when(F.col(col_name), "True").otherwise("False")
+        csv_df = hood_df
+        for col in bool_cols:
+            csv_df = csv_df.withColumn(
+                col,
+                F.when(F.upper(F.col(col)) == "TRUE", "True")
+                 .when(F.upper(F.col(col)) == "FALSE", "False")
+                 .otherwise(F.col(col))
             )
+        csv_df = csv_df.withColumn(
+            "sale_date",
+            F.date_format(F.to_date(F.col("sale_date"), "M/d/yy"), "yyyy-MM-dd")
+        )
 
-        # Format distance_downtown_miles as integer for CSV consistency
-        hood_df = hood_df.withColumn("distance_downtown_miles", F.col("distance_downtown_miles").cast("int"))
-
-        # Save to CSV
-        output_path = OUTPUT_FILES[hood]
-        hood_df.coalesce(1).write.mode("overwrite").option("header", True).csv(str(output_path))
-
-        partitions[hood] = hood_df
+        tmp_dir = str(OUTPUT_DIR / f"_tmp_{hood.replace(' ', '_').lower()}")
+        csv_df.coalesce(1).write.csv(tmp_dir, header=True, mode="overwrite")
+        part_files = glob.glob(f"{tmp_dir}/part-*.csv")
+        import os as _os
+        _os.replace(part_files[0], str(OUTPUT_FILES[hood]))
+        shutil.rmtree(tmp_dir)
 
     return partitions
 
 
 def load(partitions: dict[str, DataFrame], jdbc_url: str, pg_props: dict) -> None:
     """Insert each neighborhood dataset into its own PostgreSQL table."""
+    cast_exprs = [
+        F.col("house_id"),
+        F.col("neighborhood"),
+        F.col("price").cast("int"),
+        F.col("square_feet").cast("int"),
+        F.col("num_bedrooms").cast("int"),
+        F.col("num_bathrooms").cast("int"),
+        F.col("house_age").cast("int"),
+        F.col("garage_spaces").cast("int"),
+        F.col("lot_size_acres").cast("decimal(6,2)"),
+        F.col("has_pool").cast("boolean"),
+        F.col("recently_renovated").cast("boolean"),
+        F.col("energy_rating"),
+        F.col("location_score").cast("int"),
+        F.col("school_rating").cast("int"),
+        F.col("crime_rate").cast("int"),
+        F.col("distance_downtown_miles").cast("decimal(6,2)"),
+        F.to_date(F.col("sale_date"), "M/d/yy").alias("sale_date"),
+        F.col("days_on_market").cast("int"),
+    ]
     for hood, hood_df in partitions.items():
-        table_name = PG_TABLES[hood]
-
-        hood_df.write \
-            .jdbc(
-                url=jdbc_url,
-                table=table_name,
-                mode="overwrite",
-                properties=pg_props
-            )
+        table = PG_TABLES[hood]
+        (
+            hood_df.select(cast_exprs)
+            .write.jdbc(url=jdbc_url, table=table, mode="overwrite", properties=pg_props)
+        )
 
 # ── Main (do not modify) ───────────────────────────────────────────────────────
 def main() -> None:
