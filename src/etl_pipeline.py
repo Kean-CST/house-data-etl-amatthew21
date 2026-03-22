@@ -43,17 +43,68 @@ PG_COLUMN_SCHEMA = (
 
 def extract(spark: SparkSession, csv_path: str) -> DataFrame:
     """Load the CSV dataset into a PySpark DataFrame with correct data types."""
-    raise NotImplementedError
+    df = (
+        spark.read
+        .option("header", True)
+        .option("inferSchema", True)
+        .csv(csv_path)
+    )
+
+    # Explicit casting to match PostgreSQL schema
+    df = df.select(
+        F.col("house_id").cast("string"),
+        F.col("neighborhood").cast("string"),
+        F.col("price").cast("int"),
+        F.col("square_feet").cast("int"),
+        F.col("num_bedrooms").cast("int"),
+        F.col("num_bathrooms").cast("int"),
+        F.col("house_age").cast("int"),
+        F.col("garage_spaces").cast("int"),
+        F.col("lot_size_acres").cast("double"),
+        F.col("has_pool").cast("boolean"),
+        F.col("recently_renovated").cast("boolean"),
+        F.col("energy_rating").cast("string"),
+        F.col("location_score").cast("int"),
+        F.col("school_rating").cast("int"),
+        F.col("crime_rate").cast("int"),
+        F.col("distance_downtown_miles").cast("double"),
+        F.to_date("sale_date").alias("sale_date"),
+        F.col("days_on_market").cast("int"),
+    )
+
+    return df
 
 
 def transform(df: DataFrame) -> dict[str, DataFrame]:
     """Split the data by neighborhood and save each as a separate CSV file."""
-    raise NotImplementedError
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    partitions = {}
+
+    for hood in NEIGHBORHOODS:
+        hood_df = df.filter(F.col("neighborhood") == hood)
+
+        # Save CSV (overwrite to avoid duplicates on rerun)
+        hood_df.coalesce(1).write.mode("overwrite").option("header", True).csv(
+            str(OUTPUT_FILES[hood])
+        )
+
+        partitions[hood] = hood_df
+
+    return partitions
 
 
 def load(partitions: dict[str, DataFrame], jdbc_url: str, pg_props: dict) -> None:
     """Insert each neighborhood dataset into its own PostgreSQL table."""
-    raise NotImplementedError
+    for hood, df in partitions.items():
+        table_name = PG_TABLES[hood]
+
+        df.write.jdbc(
+            url=jdbc_url,
+            table=table_name,
+            mode="append",  # or "overwrite" if needed
+            properties=pg_props
+        )
 
 
 # ── Main (do not modify) ───────────────────────────────────────────────────────
