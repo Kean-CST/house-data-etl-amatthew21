@@ -59,14 +59,12 @@ def transform(df: DataFrame) -> dict[str, DataFrame]:
         # Sort by house_id to match expected row order
         hood_df = hood_df.orderBy("house_id")
 
-        # Format booleans as 'True' / 'False' strings
+        # Format booleans as 'True' / 'False', cast distance, and format sale_date
         hood_df = (
             hood_df
-            .withColumn("has_pool", F.when(F.col("has_pool") == True, "True").otherwise("False"))
-            .withColumn("recently_renovated", F.when(F.col("recently_renovated") == True, "True").otherwise("False"))
-            # Format distance_downtown_miles as int if possible
+            .withColumn("has_pool", F.when(F.col("has_pool"), "True").otherwise("False"))
+            .withColumn("recently_renovated", F.when(F.col("recently_renovated"), "True").otherwise("False"))
             .withColumn("distance_downtown_miles", F.col("distance_downtown_miles").cast("int"))
-            # Format sale_date as YYYY-MM-DD string, empty if null
             .withColumn("sale_date", F.when(F.col("sale_date").isNotNull(),
                                              F.date_format("sale_date", "yyyy-MM-dd")).otherwise(""))
         )
