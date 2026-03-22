@@ -43,35 +43,7 @@ PG_COLUMN_SCHEMA = (
 
 def extract(spark: SparkSession, csv_path: str) -> DataFrame:
     """Load the CSV dataset into a PySpark DataFrame with correct data types."""
-    df = (
-        spark.read
-        .option("header", True)
-        .option("inferSchema", True)
-        .csv(csv_path)
-    )
-
-    # Explicit casting to match PostgreSQL schema
-    df = df.select(
-        F.col("house_id").cast("string"),
-        F.col("neighborhood").cast("string"),
-        F.col("price").cast("int"),
-        F.col("square_feet").cast("int"),
-        F.col("num_bedrooms").cast("int"),
-        F.col("num_bathrooms").cast("int"),
-        F.col("house_age").cast("int"),
-        F.col("garage_spaces").cast("int"),
-        F.col("lot_size_acres").cast("double"),
-        F.col("has_pool").cast("boolean"),
-        F.col("recently_renovated").cast("boolean"),
-        F.col("energy_rating").cast("string"),
-        F.col("location_score").cast("int"),
-        F.col("school_rating").cast("int"),
-        F.col("crime_rate").cast("int"),
-        F.col("distance_downtown_miles").cast("double"),
-        F.to_date("sale_date").alias("sale_date"),
-        F.col("days_on_market").cast("int"),
-    )
-
+    df = spark.read.option("header", True).option("inferSchema", True).csv(csv_path)
     return df
 
 
@@ -81,24 +53,38 @@ def transform(df: DataFrame) -> dict[str, DataFrame]:
     partitions = {}
 
     for hood in NEIGHBORHOODS:
+        # Filter by neighborhood
         hood_df = df.filter(F.col("neighborhood") == hood)
 
+        # Sort by house_id to match expected row order
+        hood_df = hood_df.orderBy("house_id")
+
+        # Format booleans as 'True' / 'False' strings
+        hood_df = (
+            hood_df
+            .withColumn("has_pool", F.when(F.col("has_pool") == True, "True").otherwise("False"))
+            .withColumn("recently_renovated", F.when(F.col("recently_renovated") == True, "True").otherwise("False"))
+            # Format distance_downtown_miles as int if possible
+            .withColumn("distance_downtown_miles", F.col("distance_downtown_miles").cast("int"))
+            # Format sale_date as YYYY-MM-DD string, empty if null
+            .withColumn("sale_date", F.when(F.col("sale_date").isNotNull(),
+                                             F.date_format("sale_date", "yyyy-MM-dd")).otherwise(""))
+        )
+
+        # Write to a temporary directory
         temp_dir = OUTPUT_DIR / f"_{hood.replace(' ', '_').lower()}_tmp"
         final_file = OUTPUT_FILES[hood]
 
-        # Write to temp directory
         hood_df.coalesce(1).write.mode("overwrite").option("header", True).csv(str(temp_dir))
 
-        # Find the part file
+        # Move part-*.csv to final CSV
         part_file = next(temp_dir.glob("part-*.csv"))
-
-        # Move/rename the part file to final CSV
         os.rename(part_file, final_file)
 
-        # Delete temp directory manually
+        # Delete temp directory
         for f in temp_dir.iterdir():
-            f.unlink()  # remove all files inside
-        temp_dir.rmdir()   # remove the directory itself
+            f.unlink()
+        temp_dir.rmdir()
 
         partitions[hood] = hood_df
 
@@ -108,15 +94,12 @@ def transform(df: DataFrame) -> dict[str, DataFrame]:
 def load(partitions: dict[str, DataFrame], jdbc_url: str, pg_props: dict) -> None:
     """Insert each neighborhood dataset into its own PostgreSQL table."""
     for hood, df in partitions.items():
-        table_name = PG_TABLES[hood]
-
         df.write.jdbc(
             url=jdbc_url,
-            table=table_name,
-            mode="append",  # or "overwrite" if needed
+            table=PG_TABLES[hood],
+            mode="overwrite",
             properties=pg_props
         )
-
 
 # ── Main (do not modify) ───────────────────────────────────────────────────────
 def main() -> None:
